@@ -1,0 +1,4 @@
+{
+  "transitFeeds": [{ "type": "gtfs", "feedId": "POA", "source": "gtfs-poa.zip" }],
+  "osm": [{ "source": "poa.osm.pbf" }]
+}

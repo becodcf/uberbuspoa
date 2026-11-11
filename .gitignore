@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.log
+otp/graph.obj
+otp/otp.jar
+otp/poa.osm.pbf

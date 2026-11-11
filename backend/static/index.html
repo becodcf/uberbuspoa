@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UberBus POA</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, sans-serif; display: flex; height: 100vh; }
+  #painel { width: 380px; padding: 16px; overflow-y: auto; border-right: 1px solid #ddd; background: #fafafa; }
+  #mapa { flex: 1; }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  label { font-size: 12px; color: #555; display: block; margin-top: 8px; }
+  input, button { width: 100%; padding: 8px; font-size: 14px; margin-top: 4px; }
+  button { background: #1a73e8; color: #fff; border: 0; border-radius: 4px; cursor: pointer; margin-top: 12px; }
+  .dica { font-size: 12px; color: #777; margin: 8px 0; }
+  .opcao { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 10px; margin-top: 10px; cursor: pointer; }
+  .opcao.ativa { border-color: #1a73e8; box-shadow: 0 0 0 2px #1a73e855; }
+  .opcao b { font-size: 16px; }
+  .trecho { font-size: 13px; margin-top: 6px; }
+  .linha { display: inline-block; background: #1a73e8; color: #fff; border-radius: 4px; padding: 1px 6px; font-weight: bold; }
+  .erro { color: #c00; font-size: 13px; margin-top: 10px; }
+  @media (max-width: 700px) { body { flex-direction: column; } #painel { width: 100%; height: 50vh; } }
+</style>
+</head>
+<body>
+<div id="painel">
+  <h1>UberBus POA</h1>
+  <label>Origem</label>
+  <input id="origem" placeholder="ex: Mercado Público">
+  <label>Destino</label>
+  <input id="destino" placeholder="ex: Rua Ramiro Barcelos 2350">
+  <label>Saída</label>
+  <input id="quando" type="datetime-local">
+  <button id="buscar">Buscar rotas</button>
+  <p class="dica">Ou clique no mapa: 1º clique = origem, 2º = destino.</p>
+  <div id="resultado"></div>
+</div>
+<div id="mapa"></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const mapa = L.map('mapa').setView([-30.0346, -51.2177], 13);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19, attribution: '© OpenStreetMap'
+}).addTo(mapa);
+const camada = L.layerGroup().addTo(mapa);
+let pontos = { origem: null, destino: null };
+let marcadores = {};
+let opcoes = [];
+
+const agora = new Date(); agora.setMinutes(agora.getMinutes() - agora.getTimezoneOffset());
+document.getElementById('quando').value = agora.toISOString().slice(0, 16);
+
+function marcar(tipo, lat, lon, nome) {
+  pontos[tipo] = { lat, lon };
+  if (marcadores[tipo]) mapa.removeLayer(marcadores[tipo]);
+  marcadores[tipo] = L.marker([lat, lon], { title: tipo }).addTo(mapa).bindPopup(tipo + (nome ? ': ' + nome : ''));
+}
+
+mapa.on('click', e => {
+  const tipo = !pontos.origem || pontos.destino ? 'origem' : 'destino';
+  if (tipo === 'origem') { pontos.destino = null; if (marcadores.destino) mapa.removeLayer(marcadores.destino); }
+  marcar(tipo, e.latlng.lat, e.latlng.lng);
+  document.getElementById(tipo).value = e.latlng.lat.toFixed(5) + ', ' + e.latlng.lng.toFixed(5);
+  if (tipo === 'destino') buscar();
+});
+
+async function resolver(tipo) {
+  const txt = document.getElementById(tipo).value.trim();
+  const m = txt.match(/^(-?\d+\.\d+),\s*(-?\d+\.\d+)$/);
+  if (m) { marcar(tipo, +m[1], +m[2]); return; }
+  const r = await fetch('/api/geocode?q=' + encodeURIComponent(txt));
+  const lista = await r.json();
+  if (!r.ok || !lista.length) throw new Error('Endereço não encontrado: ' + txt);
+  marcar(tipo, lista[0].lat, lista[0].lon, lista[0].nome);
+}
+
+function decodificar(str) {  // Google encoded polyline
+  let i = 0, lat = 0, lon = 0, pts = [];
+  while (i < str.length) {
+    for (const k of [0, 1]) {
+      let b, s = 0, res = 0;
+      do { b = str.charCodeAt(i++) - 63; res |= (b & 31) << s; s += 5; } while (b >= 32);
+      const d = res & 1 ? ~(res >> 1) : res >> 1;
+      if (k === 0) lat += d; else lon += d;
+    }
+    pts.push([lat / 1e5, lon / 1e5]);
+  }
+  return pts;
+}
+
+function desenhar(idx) {
+  camada.clearLayers();
+  document.querySelectorAll('.opcao').forEach((el, i) => el.classList.toggle('ativa', i === idx));
+  const linhas = [];
+  for (const t of opcoes[idx].trechos) {
+    const pts = decodificar(t.geometria);
+    const onibus = t.modo === 'ONIBUS';
+    linhas.push(L.polyline(pts, {
+      color: onibus ? '#' + (t.cor || '1a73e8') : '#555', weight: onibus ? 6 : 4, dashArray: onibus ? null : '6 8'
+    }).addTo(camada));
+    if (onibus) L.circleMarker(pts[0], { radius: 6 }).addTo(camada).bindPopup('Embarque: ' + t.de.name);
+  }
+  mapa.fitBounds(L.featureGroup(linhas).getBounds(), { padding: [30, 30] });
+}
+
+async function buscar() {
+  const out = document.getElementById('resultado');
+  out.innerHTML = 'Buscando...';
+  try {
+    if (!pontos.origem || !/^-?\d/.test(document.getElementById('origem').value)) await resolver('origem');
+    if (!pontos.destino || !/^-?\d/.test(document.getElementById('destino').value)) await resolver('destino');
+    const q = new URLSearchParams({
+      de_lat: pontos.origem.lat, de_lon: pontos.origem.lon,
+      para_lat: pontos.destino.lat, para_lon: pontos.destino.lon,
+      quando: document.getElementById('quando').value + ':00-03:00'
+    });
+    const r = await fetch('/api/rota?' + q);
+    const dados = await r.json();
+    if (!r.ok) throw new Error(JSON.stringify(dados.detail));
+    opcoes = dados.opcoes;
+    if (!opcoes.length) { out.innerHTML = '<p class="erro">Nenhuma rota encontrada nesse horário.</p>'; return; }
+    out.innerHTML = opcoes.map((o, i) => `
+      <div class="opcao" onclick="desenhar(${i})">
+        <b>${o.saida} → ${o.chegada}</b> · ${o.duracao_min} min · ${o.caminhada_m} m a pé
+        ${o.trechos.map(t => t.modo === 'ONIBUS'
+          ? `<div class="trecho"><span class="linha">${t.linha}</span> ${t.nome_linha || ''}<br>
+             ${t.saida} embarque em <i>${t.de.name}</i><br>${t.chegada} desce em <i>${t.para.name}</i> (${t.paradas} paradas)</div>`
+          : `<div class="trecho">A pé: ${t.duracao_min} min (${t.distancia_m} m)</div>`).join('')}
+      </div>`).join('');
+    desenhar(0);
+  } catch (e) {
+    out.innerHTML = '<p class="erro">' + e.message + '</p>';
+  }
+}
+document.getElementById('buscar').onclick = buscar;
+</script>
+</body>
+</html>
